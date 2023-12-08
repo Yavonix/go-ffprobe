@@ -3,10 +3,12 @@ package ffprobe
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 )
 
 var binPath = "ffprobe"
@@ -93,6 +95,63 @@ func runProbe(cmd *exec.Cmd) (data *ProbeData, err error) {
 	}
 	for _, str := range data.Streams {
 		str.Tags.setFrom(str.TagList)
+	}
+
+	return data, nil
+}
+
+func ProbeKeyframes(ctx context.Context, reader io.Reader, streams string, extraFFProbeOptions ...string) (data []float64, err error) {
+	if streams == "" {
+		streams = "v"
+	}
+	args := append([]string{
+		"-select_streams", streams,
+		"-print_format", "csv",
+		"-show_entries", "frame=pict_type,pts_time",
+		"-skip_frame", "nokey",
+		"-loglevel", "fatal",
+	}, extraFFProbeOptions...)
+
+	// Add the file argument
+	args = append(args, "-")
+
+	cmd := exec.CommandContext(ctx, binPath, args...)
+	cmd.Stdin = reader
+	cmd.SysProcAttr = procAttributes()
+
+	var outputBuf bytes.Buffer
+	var stdErr bytes.Buffer
+
+	cmd.Stdout = &outputBuf
+	cmd.Stderr = &stdErr
+
+	err = cmd.Run()
+	if err != nil {
+		return nil, fmt.Errorf("error running %s [%s] %w", binPath, stdErr.String(), err)
+	}
+
+	if stdErr.Len() > 0 {
+		return nil, fmt.Errorf("ffprobe error: %s", stdErr.String())
+	}
+
+	data = []float64{}
+	r := csv.NewReader(&outputBuf)
+	r.FieldsPerRecord = -1
+
+	for {
+		record, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return data, fmt.Errorf("error parsing csv: %w %s", err, record)
+		}
+
+		val, err := strconv.ParseFloat(record[1], 64)
+		if err != nil {
+			return data, fmt.Errorf("error parsing float64: %w %s", err, record)
+		}
+		data = append(data, val)
 	}
 
 	return data, nil
